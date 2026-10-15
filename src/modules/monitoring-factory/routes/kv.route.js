@@ -1,88 +1,38 @@
-import { Router } from 'express';
+import { Router } from "express";
 const routes = Router();
 
-import Kv1Model from '../models/kv1.js';
-import Kv2Model from '../models/kv2.js';
-import Kv3Model from '../models/kv3.js';
-import Kv4Model from '../models/kv4.js';
-import Kv5Model from '../models/kv5.js';
+import Kv1Model from "../models/kv1.js";
+import Kv2Model from "../models/kv2.js";
+import Kv3Model from "../models/kv3.js";
+import Kv4Model from "../models/kv4.js";
+import Kv5Model from "../models/kv5.js";
+import { asyncRoute, modelFor } from "./route.helpers.js";
 
-routes.route('/count').get(async(req, res) => {
-    const count = await Kv1Model.countDocuments({}, (err) => {
-        if (err) {
-            console.error(err);
-            return;
-        }
-    });
-    res.json(count);
+const byKv = modelFor({
+  kv1: Kv1Model,
+  kv2: Kv2Model,
+  kv3: Kv3Model,
+  kv4: Kv4Model,
+  kv5: Kv5Model,
 });
 
-routes.route('/post/get-data').post((req, res) => {
-    let KV;
-    switch (req.body.kv) {
-        case "kv1":
-            KV = Kv1Model;
-            break;
-        case "kv2":
-            KV = Kv2Model;
-            break;
-        case "kv3":
-            KV = Kv3Model;
-            break;
-        case "kv4":
-            KV = Kv4Model;
-            break;
-        case "kv5":
-            KV = Kv5Model;
-            break;
-    }
-
-    const obj = req.body.obj;
-    const limit = req.body.limit;
-    if (limit) {
-        KV.find(obj, (err, kv1ObjRes) => {
-            if (err)
-                console.error(err);
-            else
-                res.json(kv1ObjRes);
-        }).sort({ date: -1, key: 1 }).limit(limit);
-    } else {
-        KV.find(obj, (err, kv1ObjRes) => {
-            if (err)
-                console.error(err);
-            else
-                res.json(kv1ObjRes);
-        }).sort({ date: -1, key: 1 });
-    }
+routes.route("/").get(async (req, res) => {
+  res.send("ok");
 });
+
+routes.route("/count").post(byKv, asyncRoute(async (req, res) => {
+  res.json(await req.Model.countDocuments({}));
+}));
+
+routes.route("/post/get-data").post(byKv, asyncRoute(async (req, res) => {
+  let query = req.Model.find(req.body.obj || {}).sort({ date: -1, key: 1 });
+  if (req.body.limit) query = query.limit(Number(req.body.limit));
+  res.json(await query);
+}));
 
 // Defined delete | remove | destroy route
-routes.route('/put/delete-many').put((req, res) => {
-    let KV;
-    switch (req.body.kv) {
-        case "kv1":
-            KV = Kv1Model;
-            break;
-        case "kv2":
-            KV = Kv2Model;
-            break;
-        case "kv3":
-            KV = Kv3Model;
-            break;
-        case "kv4":
-            KV = Kv4Model;
-            break;
-        case "kv5":
-            KV = Kv5Model;
-            break;
-    }
-
-    KV.deleteMany(req.body.obj, null, (err, kv1ObjRes) => {
-        if (err)
-            console.error(err);
-        else
-            res.json(kv1ObjRes);
-    });
-});
+routes.route("/put/delete-many").put(byKv, asyncRoute(async (req, res) => {
+  res.json(await req.Model.deleteMany(req.body.obj || {}));
+}));
 
 export default routes;
