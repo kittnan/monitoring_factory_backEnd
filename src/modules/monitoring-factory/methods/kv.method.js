@@ -90,38 +90,108 @@ methods.stop = () => {
     timers = [];
 };
 
+// FTP problems that repeat every run (e.g. a locked file) are logged once,
+// then again only when the message changes or the problem clears.
+const ftpWarnings = new Map();
+const ftpWarn = (key, err) => {
+    // FTP errors already start with the reply code ("550 ..."); don't repeat it
+    const code = err.code !== undefined ? String(err.code) : "";
+    const msg = code && !String(err.message).startsWith(code) ? `${code} ${err.message}` : String(err.message);
+    if (ftpWarnings.get(key) === msg) return;
+    ftpWarnings.set(key, msg);
+    console.error(now(), `[ftp] ${key} failed: ${msg}`);
+};
+const ftpOk = (key) => {
+    if (ftpWarnings.delete(key)) log(`[ftp] ${key} ok again`);
+};
+
+// Remote files the logger may still be writing: path -> { size, since }.
+// A file is downloaded only once its size has stayed the same for
+// FTP_MIN_AGE_SEC, measured with this server's clock (the FTP's file
+// timestamps aren't trusted). Lost on restart, which only delays one cycle.
+const ftpSeen = new Map();
+methods.isStable = (remoteFile, size, nowMs = Date.now(), minAgeMs = env.ftp.minAgeMs) => {
+    if (!(minAgeMs > 0)) return true;
+    const seen = ftpSeen.get(remoteFile);
+    if (!seen || seen.size !== size) {
+        ftpSeen.set(remoteFile, { size, since: nowMs });
+        return false;
+    }
+    return nowMs - seen.since >= minAgeMs;
+};
+
 // Download every CSV waiting on the FTP into CSV_DIR, then remove it from the FTP.
 // Files are written as *.part and renamed when complete, so the importer never
-// sees a half-written file.
+// sees a half-written file. A failure on one folder or file is logged with the
+// FTP command (LIST / RETR / DELE) and skipped, so it can't block the others.
 let fileCounter = 0;
-methods.kvFTP = async(client = new Client(env.ftp.timeout)) => {
+methods.kvFTP = async(client = new Client(env.ftp.timeout), nowMs = Date.now()) => {
+    const listed = new Set();
     try {
-        await client.access({
-            host: env.ftp.host,
-            user: env.ftp.user,
-            password: env.ftp.password,
-            secure: false,
-        });
+        try {
+            await client.access({
+                host: env.ftp.host,
+                user: env.ftp.user,
+                password: env.ftp.password,
+                secure: false,
+            });
+            ftpOk(`LOGIN ${env.ftp.host}`);
+        } catch (err) {
+            ftpWarn(`LOGIN ${env.ftp.host}`, err);
+            return;
+        }
         await fsp.mkdir(CSV_DIR, { recursive: true });
 
         for (const kv of KVS) {
             const remoteDir = `${FTP_DIR}/${kv.dir}`;
-            const files = (await client.list(remoteDir)).filter((f) => f.isFile);
+            let files;
+            try {
+                files = (await client.list(remoteDir)).filter((f) => f.isFile);
+                ftpOk(`LIST ${remoteDir}`);
+            } catch (err) {
+                if (client.closed) throw err; // connection lost: stop this run
+                ftpWarn(`LIST ${remoteDir}`, err);
+                continue;
+            }
+
             for (const file of files) {
+                const remoteFile = `${remoteDir}/${file.name}`;
+                listed.add(remoteFile);
+                // Still being written (new, or grew since last run): try next run
+                if (!methods.isStable(remoteFile, file.size, nowMs)) continue;
+
                 const name = `${kv.dir}_${Date.now()}_${String(fileCounter++ % 1000).padStart(3, "0")}.csv`;
                 const target = path.join(CSV_DIR, name);
                 const part = `${target}.part`;
                 try {
-                    await client.downloadTo(part, `${remoteDir}/${file.name}`);
+                    await client.downloadTo(part, remoteFile);
                     await fsp.rename(part, target);
+                    ftpOk(`RETR ${remoteFile}`);
                 } catch (err) {
                     await fsp.rm(part, { force: true });
-                    throw err;
+                    if (client.closed) throw err;
+                    ftpWarn(`RETR ${remoteFile}`, err);
+                    continue;
                 }
-                // Only remove from the FTP once the local copy is complete
-                await client.remove(`${remoteDir}/${file.name}`);
-                log(`ftp downloaded ${kv.dir}/${file.name} -> ${name}`);
+
+                // Only remove from the FTP once the local copy is complete. If the
+                // server refuses (e.g. the logger still has the file open), the file
+                // stays and is downloaded again next run; already-imported rows are
+                // skipped by the importer, so nothing is duplicated.
+                try {
+                    await client.remove(remoteFile);
+                    ftpOk(`DELE ${remoteFile}`);
+                    log(`ftp downloaded ${kv.dir}/${file.name} -> ${name}`);
+                } catch (err) {
+                    if (client.closed) throw err;
+                    ftpWarn(`DELE ${remoteFile}`, err);
+                }
             }
+        }
+
+        // Forget files that are gone from the FTP
+        for (const remoteFile of ftpSeen.keys()) {
+            if (!listed.has(remoteFile)) ftpSeen.delete(remoteFile);
         }
     } finally {
         client.close();

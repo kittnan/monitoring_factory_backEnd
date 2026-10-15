@@ -76,6 +76,9 @@ export default {
         password: required('FTP_PASSWORD'),
         remoteDir: env('FTP_REMOTE_DIR', '/MMC'),
         timeout: number('FTP_TIMEOUT_MS', 10000),
+        // Download a file only after its size has not changed for this long
+        // (the logger may still be writing it). 0 = download immediately.
+        minAgeMs: number('FTP_MIN_AGE_SEC', 60) * 1000,
     },
 
     csvDir: env('CSV_DIR', 'D:\\MonitoringFactoryCSV\\ftpData'),
